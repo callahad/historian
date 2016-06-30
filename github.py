@@ -1,9 +1,9 @@
 import github3
 
+from utils import partition
+
 from collections import defaultdict
 from datetime import (datetime, timezone)
-from itertools import groupby
-from pprint import pprint
 
 # See: https://developer.github.com/v3/activity/events/types/
 
@@ -43,6 +43,8 @@ IGNORE_EVENTS = [
     'WatchEvent',  # User starred a repo
 ]
 
+KNOWN_EVENTS = KEEP_EVENTS + IGNORE_EVENTS
+
 
 class GhReporter(object):
     def __init__(self, api_key):
@@ -56,84 +58,195 @@ class GhReporter(object):
         user = self.gh.user(who)
 
         all_events = list(user.iter_events())
+        all_events.sort(key=lambda e: e.created_at, reverse=True)
+
         oldest = all_events[-1]
         if oldest.created_at >= start:
-            msg = "Warning: May be missing valid events between %s and %s"
+            msg = 'Warning: May be missing valid events between %s and %s'
             print(msg % (datetime.strftime(start, fmt),
                          datetime.strftime(oldest.created_at, fmt)))
 
         events = [e for e in user.iter_events() if start <= e.created_at < end]
 
-        good_events = []
-        for event in events:
-            if event.type in IGNORE_EVENTS:
+        known, unknown = partition(lambda e: e.type in KNOWN_EVENTS, events)
+        for event in unknown:
+            print('Warning: Unrecognized event type: %s' % event.type)
+
+        kept, ignored = partition(lambda e: e.type in KEEP_EVENTS, known)
+
+        rest = kept
+
+        # Report All Private -> Public Repository Transitions
+        matches, rest = partitiontype('PublicEvent', rest)
+        for event in matches:
+            tmpl = '* made {repository.full_name} public'
+            print(tmpl.format(**event.payload))
+
+        # Report All Pull Request Interactions
+        data = []
+
+        matches, rest = partitiontype('PullRequestEvent', rest)
+        for event in matches:
+            pr = event.payload['pull_request']
+
+            repo = '/'.join(event.repo)
+            when = event.created_at
+            num = pr.number
+            user = pr.user.login
+            title = pr.title
+
+            action = event.payload['action']
+            if action == 'closed' and pr.to_json()['merged']:
+                action = 'merged'
+
+            data.append((repo, num, when, action, user, title))
+
+        matches, rest = partition(is_pr_comment, rest)
+        for event in matches:
+            issue = event.payload['issue']
+
+            repo = '/'.join(event.repo)
+            when = event.created_at
+            num = issue.number
+            user = issue.user.login
+            title = issue.title
+
+            action = event.payload['action']
+            if action == 'created':
+                action = 'discussed'
+
+            data.append((repo, num, when, action, user, title))
+
+        matches, rest = partitiontype('PullRequestReviewCommentEvent', rest)
+        for event in matches:
+            if event.payload['action'] == 'deleted':
                 continue
-            elif event.type in KEEP_EVENTS:
-                good_events.append(event)
-            else:
-                print("Unhandled event type: %s" % event.type)
 
-        k = lambda x: (x.repo[1], x.repo[0])
-        for (repo, org), repo_events in groupby(sorted(good_events, key=k), k):
-            print("\n#### %s/%s\n" % (org, repo))
+            pr = event.payload['pull_request']
 
-            repo_events = list(repo_events)
+            repo = '/'.join(event.repo)
+            when = event.created_at
+            num = pr.number
+            user = pr.user.login
+            title = pr.title
 
-            # Report on pushed commits
-            pushes = defaultdict(int)
-            for event in repo_events:
-                if event.type == 'PushEvent':
-                    num = event.payload['size']
-                    ref = event.payload['ref'].split('/')[-1]
-                    pushes[ref] += num
+            action = 'discussed'
 
-            for ref, count in sorted(pushes.items()):
-                if count == 0:
-                    continue
-                noun = 'commit' if count == 1 else 'commits'
-                print("pushed {} {} to {} branch".format(count, noun, ref))
+            data.append((repo, num, when, action, user, title))
 
-            # Note: Not actually tested
-            pages = set()
-            for event in repo_events:
-                if event.type == 'GollumEvent':
-                    for page in event.payload['pages']:
-                        pages.add(page.title)
+        for repo, num, _, action, user, title in sorted(data):
+            tmpl = '* {action} pull request {repo}#{num} by @{user} - {title}'
+            print(tmpl.format(**locals()))
 
-            for page in sorted(pages):
-                print("edited wiki page - {}".format(page))
+        # Report All Issues and Issue Comments
+        data = []
 
-            for event in repo_events:
-                type = event.type
-                if type == 'CommitCommentEvent':
-                    print("commented on commit {comment.commit_id:.8}".format(**event.payload))
-                elif type == 'GollumEvent':
-                    continue
-                elif type == 'IssueCommentEvent':
-                    print("commented on issue {issue.number} - {issue.title}".format(**event.payload))
-                elif type == 'IssuesEvent':
-                    print("{action} issue #{issue.number} - {issue.title}".format(**event.payload))
-                elif type == 'PublicEvent':
-                    # Not actually tested...
-                    print("made {repository.full_name} public".format(**event.payload))
-                elif type == 'PullRequestEvent':
-                    pr = event.payload['pull_request']
+        matches, rest = partitiontype('IssuesEvent', rest)
+        for event in matches:
+            repo = '/'.join(event.repo)
+            when = event.created_at
+            num = event.payload['issue'].number
+            title = event.payload['issue'].title
+            action = event.payload['action']
 
-                    action = event.payload['action']
-                    if action == "closed" and pr.to_json()['merged']:
-                        action = "merged"
+            data.append((repo, num, when, action, title))
 
-                    number = pr.number
-                    user = pr.user.login
-                    title = pr.title
+        matches, rest = partition(is_issue_comment, rest)
+        for event in matches:
+            if event.payload['action'] == 'deleted':
+                continue
 
-                    print("{} pull request #{} by @{} - {}".format(action, number, user, title))
-                elif type == 'PullRequestReviewCommentEvent':
-                    print("{action} a comment on pull request #{pull_request.number} - {pull_request.title}".format(**event.payload))
-                elif type == 'PushEvent':
-                    continue
-                elif type == 'ReleaseEvent':
-                    # Not actually tested...
-                    print("published release {}".format(event.payload['release'].name))
-                else:
-                    print("Unhandled event type: %s" % type)
+            repo = '/'.join(event.repo)
+            when = event.created_at
+            num = event.payload['issue'].number
+            title = event.payload['issue'].title
+            action = 'discussed'
+
+            data.append((repo, num, when, action, title))
+
+        for repo, num, _, action, title in sorted(data):
+            tmpl = '* {action} issue {repo}#{num} - {title}'
+            print(tmpl.format(**locals()))
+
+        # Report all Commits
+        data = defaultdict(int)
+
+        matches, rest = partitiontype('PushEvent', rest)
+        for event in matches:
+            num = event.payload['size']
+            repo = '/'.join(event.repo)
+            branch = event.payload['ref'].split('/')[-1]
+
+            if num == 0:
+                continue
+
+            data[(repo, branch)] += num
+
+        for (repo, branch), count in sorted(data.items()):
+            noun = 'commit' if count == 1 else 'commits'
+
+            tmpl = '* pushed {} {} to {} branch {}'
+            print(tmpl.format(count, noun, repo, branch))
+
+        # Report all Commit Comments
+        matches, rest = partitiontype('CommitCommentEvent', rest)
+        for event in matches:
+            repo = '/'.join(event.repo)
+            sha = event.payload['comment'].commit_id
+
+            tmpl = '* commented on commit {:.8} in {}'
+            print(tmpl.format(sha, repo))
+
+        # Report on all Wiki updates
+        data = defaultdict(set)
+
+        matches, rest = partitiontype('GollumEvent', rest)
+        for event in matches:
+            repo = '/'.join(event.repo)
+
+            for page in event.payload('pages'):
+                data[repo].add(page.title)
+
+        for repo, page in sorted(data.items()):
+            tmpl = '* edited {} wiki page - {}'
+            print(tmpl.format(repo, page))
+
+        # Report on all Release events
+        data = defaultdict(set)
+
+        matches, rest = partitiontype('ReleaseEvent', rest)
+        for event in matches:
+            repo = '/'.join(event.repo)
+            name = event.payload['release'].name
+
+            data[repo].add(name)
+
+        for repo, release in sorted(data.items()):
+            tmpl = '* published release of {} - {}'
+            print(tmpl.format(repo, release))
+
+        return 'Incomplete'
+
+
+# -- Local Helpers
+
+def partitiontype(type, lst):
+    return partition(lambda event: event.type == type, lst)
+
+
+def is_issue_comment(event):
+    try:
+        right_type = event.type == 'IssueCommentEvent'
+        right_payload = 'pull_request' not in event.payload['issue'].to_json()
+        return right_type and right_payload
+    except (KeyError, IndexError, AttributeError, TypeError):
+        return False
+
+
+def is_pr_comment(event):
+    try:
+        right_type = event.type == 'IssueCommentEvent'
+        right_payload = 'pull_request' in event.payload['issue'].to_json()
+        return right_type and right_payload
+    except (KeyError, IndexError, AttributeError, TypeError):
+        return False
