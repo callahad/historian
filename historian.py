@@ -2,46 +2,52 @@
 
 """Historian discovers what you did last quarter."""
 
-from configparser import ConfigParser
+from datetime import datetime, timezone
 from os import mkdir
 from shutil import rmtree
 
-from reporters import Bugzilla, GitHub
+from configobj import ConfigObj
+
+import sources
 
 
 def main():
     """Generate reports of online activity."""
-    config = ConfigParser()
-    config.read('config.ini')
+    config = ConfigObj('config.ini', interpolation=False)
 
-    creds = config['CREDENTIALS']
-    bz = Bugzilla(creds['BugzillaUsername'], creds['BugzillaPassword'])
-    gh = GitHub(creds['GitHubAPIKey'])
+    # FIXME: Hardcoded start / end dates, currently 2016 Q2
+    start = datetime(2016, 4, 1).replace(tzinfo=timezone.utc)
+    end = datetime(2016, 7, 1).replace(tzinfo=timezone.utc)
 
-    # Remove the CREDENTIALS section to ease looping over all other sections
-    config.remove_section('CREDENTIALS')
+    # Initialize all sources
+    reporters = {}
+    for source_name, params in config['Sources'].items():
+        try:
+            key = source_name.lower()
+            constructor = sources.__getattribute__(source_name)
+            reporters[key] = constructor(**params, start=start, end=end)
+        except AttributeError:
+            print('No source found: %s' % source_name)
+            continue
 
     # Prepare a clean output directory
     rmtree('out', ignore_errors=True)
     mkdir('out')
 
-    for teammate in config.sections():
-        print("%s:" % teammate)
-        with open('out/%s.md' % teammate, 'w') as f:
-            f.write('## %s\'s Q2 2016 Activity\n\n' % teammate)
+    # Generate a report for each user
+    for name, accounts in config['Users'].items():
+        print('%s:' % name)
 
-            bugmail = config[teammate]['bugzilla']
-            if bugmail:
-                print("    - Bugzilla")
-                f.write('### Bugzilla\n\n')
-                f.write(bz.report(bugmail, '2016-04-01', '2016-06-30'))
-                f.write('\n')
+        with open('out/%s.md' % name, 'w') as f:
+            for source, identity in accounts.items():
+                if source not in reporters:
+                    print('    - %s (skipped: source not enabled)' % source)
+                    continue
 
-            ghuser = config[teammate]['github']
-            if ghuser:
-                print("    - GitHub")
-                f.write('### GitHub\n\n')
-                f.write(gh.report(ghuser, '2016-04-01', '2016-06-30'))
+                print('    - %s' % source)
+                reporter = reporters[source]
+                f.write('### %s\n\n' % reporter.__class__.__name__)
+                f.write(reporter.report(identity))
                 f.write('\n')
 
 if __name__ == '__main__':

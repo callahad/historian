@@ -22,7 +22,7 @@ OTHER = 'other'
 
 
 class Bugzilla(object):
-    def __init__(self, username, password):
+    def __init__(self, username, password, start, end):
         # We need to access /page.cgi, which is not part of the REST API.
         # For good data, we must simulate logging in and use cookies. Boo.
         print('Logging into Bugzilla...')
@@ -37,7 +37,10 @@ class Bugzilla(object):
         print('Ok!\n')
         self.cookies = response.cookies
 
-    def report(self, who, start, end):
+        self.start = start
+        self.end = end
+
+    def report(self, who):
         response = requests.get(BZ_BASE + '/page.cgi',
                                 cookies=self.cookies,
                                 params={
@@ -45,8 +48,8 @@ class Bugzilla(object):
                                     'action': 'run',
                                     'group': 'bug',
                                     'who': who,
-                                    'from': start,
-                                    'to': end,
+                                    'from': self.start.strftime('%Y-%m-%d'),
+                                    'to': self.end.strftime('%Y-%m-%d'),
                                 })
 
         if not response.ok:

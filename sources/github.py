@@ -3,7 +3,6 @@ import github3
 from utils import partition
 
 from collections import defaultdict
-from datetime import (datetime, timezone)
 
 # See: https://developer.github.com/v3/activity/events/types/
 
@@ -47,26 +46,25 @@ KNOWN_EVENTS = KEEP_EVENTS + IGNORE_EVENTS
 
 
 class GitHub(object):
-    def __init__(self, api_key):
-        self.gh = github3.login(token=api_key)
+    def __init__(self, token, start, end):
+        self.gh = github3.login(token=token)
+        self.start = start
+        self.end = end
 
-    def report(self, who, start, end):
-        fmt = '%Y-%m-%d'
-        start = datetime.strptime(start, fmt).replace(tzinfo=timezone.utc)
-        end = datetime.strptime(end, fmt).replace(tzinfo=timezone.utc)
-
+    def report(self, who):
         user = self.gh.user(who)
 
         all_events = list(user.iter_events())
         all_events.sort(key=lambda e: e.created_at, reverse=True)
 
         oldest = all_events[-1]
-        if oldest.created_at >= start:
+        if oldest.created_at >= self.start:
             msg = 'Warning: May be missing valid events between %s and %s'
-            print(msg % (datetime.strftime(start, fmt),
+            print(msg % (datetime.strftime(self.start, fmt),
                          datetime.strftime(oldest.created_at, fmt)))
 
-        events = [e for e in user.iter_events() if start <= e.created_at < end]
+        events = [e for e in user.iter_events()
+                  if self.start <= e.created_at < self.end]
 
         known, unknown = partition(lambda e: e.type in KNOWN_EVENTS, events)
         for event in unknown:

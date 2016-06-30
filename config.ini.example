@@ -1,8 +1,15 @@
-[CREDENTIALS]
-BugzillaUsername = you@example.com
-BugzillaPassword = p@ssw0rd!
-GitHubAPIKey = 5ca1ab1eda7aba5e...
+[Sources]
 
-[Your Name]
+[[Bugzilla]]
+username = 
+password = 
+
+[[GitHub]]
+token = 
+
+
+[Users]
+
+[[YourName]]
 bugzilla = you@example.com
 github = you
