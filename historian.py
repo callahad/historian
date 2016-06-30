@@ -12,9 +12,20 @@ def main():
     config = ConfigParser()
     config.read('config.ini')
 
+    # TODO: Future Data Source Ideas:
+    # - Lanyrd
+    # - RSS Feeds
+    # - Hacker News
+    # - Reddit
+    # - Lobsters
+    # - Twitter
+    # - iCal feeds?
+
     creds = config['CREDENTIALS']
     bz = BzReporter(creds['BugzillaUsername'], creds['BugzillaPassword'])
     gh = GhReporter(creds['GitHubAPIKey'])
+
+    # Remove the CREDENTIALS section to ease looping over all other sections
     config.remove_section('CREDENTIALS')
 
     # Prepare a clean output directory
@@ -31,6 +42,13 @@ def main():
                 print("    - Bugzilla")
                 f.write('### Bugzilla\n\n')
                 f.write(bz.report(bugmail, '2016-04-01', '2016-06-30'))
+                f.write('\n')
+
+            ghuser = config[teammate]['github']
+            if ghuser:
+                print("    - GitHub")
+                f.write('### GitHub\n\n')
+                f.write(gh.report(ghuser, '2016-04-01', '2016-06-30'))
                 f.write('\n')
 
 if __name__ == '__main__':
