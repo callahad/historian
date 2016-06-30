@@ -21,7 +21,7 @@ TRIAGED = 'triaged'
 OTHER = 'other'
 
 
-class BzReporter(object):
+class Bugzilla(object):
     def __init__(self, username, password):
         # We need to access /page.cgi, which is not part of the REST API.
         # For good data, we must simulate logging in and use cookies. Boo.

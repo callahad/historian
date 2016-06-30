@@ -46,7 +46,7 @@ IGNORE_EVENTS = [
 KNOWN_EVENTS = KEEP_EVENTS + IGNORE_EVENTS
 
 
-class GhReporter(object):
+class GitHub(object):
     def __init__(self, api_key):
         self.gh = github3.login(token=api_key)
 

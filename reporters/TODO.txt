@@ -1,0 +1,9 @@
+Future data source ideas:
+
+- Lanyrd
+- RSS Feeds
+- Hacker News
+- Reddit
+- Lobsters
+- Twitter
+- iCal feeds?

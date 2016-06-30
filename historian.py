@@ -1,29 +1,22 @@
 #!/usr/bin/env python3
 
-from bugzilla import BzReporter
-from github import GhReporter
+"""Historian discovers what you did last quarter."""
 
 from configparser import ConfigParser
 from os import mkdir
 from shutil import rmtree
 
+from reporters import Bugzilla, GitHub
+
 
 def main():
+    """Generate reports of online activity."""
     config = ConfigParser()
     config.read('config.ini')
 
-    # TODO: Future Data Source Ideas:
-    # - Lanyrd
-    # - RSS Feeds
-    # - Hacker News
-    # - Reddit
-    # - Lobsters
-    # - Twitter
-    # - iCal feeds?
-
     creds = config['CREDENTIALS']
-    bz = BzReporter(creds['BugzillaUsername'], creds['BugzillaPassword'])
-    gh = GhReporter(creds['GitHubAPIKey'])
+    bz = Bugzilla(creds['BugzillaUsername'], creds['BugzillaPassword'])
+    gh = GitHub(creds['GitHubAPIKey'])
 
     # Remove the CREDENTIALS section to ease looping over all other sections
     config.remove_section('CREDENTIALS')
