@@ -63,6 +63,7 @@ class GitHub(object):
     def report(self, who):
         """Generate a report of a given user's activity."""
         user = self.gh.user(who)
+        result = ''
 
         # Only relevant dates
         events = prune(user.iter_events(), self.start, self.end)
@@ -78,34 +79,36 @@ class GitHub(object):
         for repo, events in groupby(sorted(events, key=key), key=key):
             repo = '/'.join(repo)
 
-            print('#### %s\n' % repo)
+            result += '#### %s\n\n' % repo
 
             unused = events
 
             # Private -> Public Transitions, Software Releases
             lines, unused = handle_public_events(unused)
-            print_group('Publications and Releases', lines)
+            result += stringify_group('Publications and Releases', lines)
 
             # Commit Pushes, Commit Comments
             lines, unused = handle_commit_events(unused)
-            print_group('Commits and Comments', lines)
+            result += stringify_group('Commits and Comments', lines)
 
             # Pull Requests, Pull Request File / Line / General Comments
             lines, unused = handle_pr_events(unused, who)
-            print_group('Pull Requests', lines)
+            result += stringify_group('Pull Requests', lines)
 
             # Issues, Issue Comments
             lines, unused = handle_issue_events(unused)
-            print_group('Issues', lines)
+            result += stringify_group('Issues', lines)
 
             # Wiki Updates
             lines, unused = handle_wiki_events(unused)
-            print_group('Wiki', lines)
+            result += stringify_group('Wiki', lines)
 
             for event in unused:
                 print("Warning: Unused event of type %s" % event.type)
 
-        return ''
+        print(result)
+
+        return result
 
 
 # -- Event List Processors
@@ -157,8 +160,11 @@ def handle_commit_events(iterable):
     # Commit Comments
     events, unused = partition_type('CommitCommentEvent', unused)
     for event in events:
-        tmpl = 'commented on commit {:.8}'
-        lines.append(tmpl.format(event.payload['comment'].commit_id))
+        sha = event.payload['comment'].commit_id
+        url = event.payload['comment'].html_url
+
+        tmpl = 'commented on commit [{:.8}]({})'
+        lines.append(tmpl.format(sha, url))
 
     return (lines, unused)
 
@@ -177,6 +183,7 @@ def handle_pr_events(iterable, who=None):
 
         number = pr.number
         title = pr.title
+        url = pr.html_url
         user = pr.user.login
 
         action = event.payload['action']
@@ -187,8 +194,7 @@ def handle_pr_events(iterable, who=None):
             action = 'proposed' if action == 'opened' else action
             action = 'rescinded' if action == 'closed' else action
 
-        key = (number, user, title)
-        actions[key].append(action)
+        actions[(number, title, url, user)].append(action)
 
     # Pull Request General Comments
     events, unused = partition(is_pr_comment, unused)
@@ -200,10 +206,10 @@ def handle_pr_events(iterable, who=None):
 
         number = pr.number
         title = pr.title
+        url = pr.html_url
         user = pr.user.login
 
-        key = (number, user, title)
-        actions[key].append('discussed')
+        actions[(number, title, url, user)].append('discussed')
 
     # Pull Request File / Line Comments
     events, unused = partition_type('PullRequestReviewCommentEvent', unused)
@@ -215,20 +221,20 @@ def handle_pr_events(iterable, who=None):
 
         number = pr.number
         title = pr.title
+        url = pr.html_url
         user = pr.user.login
 
-        key = (number, user, title)
-        actions[key].append('discussed')
+        actions[(number, title, url, user)].append('discussed')
 
-    for (number, user, title), actions in sorted(actions.items()):
-        summary = grammatical_join(list(uniq(actions)))
+    for (number, title, url, user), actions in sorted(actions.items()):
+        did = grammatical_join(list(uniq(actions)))
 
         if user == who:
-            tmpl = '{} pull request #{} - {}'
-            lines.append(tmpl.format(summary, number, title))
+            tmpl = '{} [pull request #{number}]({url}): {title}'
         else:
-            tmpl = '{} pull request #{} by @{} - {}'
-            lines.append(tmpl.format(summary, number, user, title))
+            tmpl = '{} [pull request #{number}]({url}) by @{user}: {title}'
+
+        lines.append(tmpl.format(did, **locals()))
 
     return (lines, unused)
 
@@ -245,8 +251,9 @@ def handle_issue_events(iterable):
     for event in events:
         number = event.payload['issue'].number
         title = event.payload['issue'].title
+        url = event.payload['issue'].html_url
 
-        key = (number, title)
+        key = (number, title, url)
         actions[key].append(event.payload['action'])
 
     # Issue Comments
@@ -257,15 +264,16 @@ def handle_issue_events(iterable):
 
         number = event.payload['issue'].number
         title = event.payload['issue'].title
+        url = event.payload['issue'].html_url
 
-        key = (number, title)
+        key = (number, title, url)
         actions[key].append('discussed')
 
-    for (number, title), actions in sorted(actions.items()):
-        summary = grammatical_join(list(uniq(actions)))
+    for (number, title, url), actions in sorted(actions.items()):
+        did = grammatical_join(list(uniq(actions)))
 
-        tmpl = '{} issue #{} - {}'
-        lines.append(tmpl.format(summary, number, title))
+        tmpl = '{} [issue #{}]({}) - {}'
+        lines.append(tmpl.format(did, number, url, title))
 
     return (lines, unused)
 
@@ -342,6 +350,19 @@ def is_pr_comment(event):
         return right_type and right_payload
     except (KeyError, IndexError, AttributeError, TypeError):
         return False
+
+
+def stringify_group(header, lines):
+    """Join all lines in an array into a single string."""
+    lines = list(lines)
+
+    if not lines:
+        return ''
+
+    heading = '%s:\n\n' % header
+    body = '\n'.join('* %s' % line for line in lines)
+
+    return heading + body + '\n\n'
 
 
 def print_group(header, lines):
