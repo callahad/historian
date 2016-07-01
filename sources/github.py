@@ -4,6 +4,8 @@ import github3
 
 from collections import defaultdict
 from datetime import datetime
+from itertools import groupby
+from operator import attrgetter
 
 from utils import partition
 
@@ -71,161 +73,224 @@ class GitHub(object):
         # Only events of whitelisted types
         events = filter_types(KEEP_EVENTS, events)
 
-        rest = events
+        # Group events by repository
+        key = attrgetter('repo')
+        for repo, events in groupby(sorted(events, key=key), key=key):
+            repo = '/'.join(repo)
 
-        # Report All Private -> Public Repository Transitions
-        matches, rest = partition_type('PublicEvent', rest)
-        for event in matches:
-            tmpl = '* made {repository.full_name} public'
-            print(tmpl.format(**event.payload))
+            print('#### %s\n' % repo)
 
-        # Report All Pull Request Interactions
-        data = []
+            unused = events
 
-        matches, rest = partition_type('PullRequestEvent', rest)
-        for event in matches:
-            pr = event.payload['pull_request']
+            # Private -> Public Transitions, Software Releases
+            lines, unused = handle_public_events(unused)
+            print_group('Publications and Releases', lines)
 
-            repo = '/'.join(event.repo)
-            when = event.created_at
-            num = pr.number
-            user = pr.user.login
-            title = pr.title
+            # Commit Pushes, Commit Comments
+            lines, unused = handle_commit_events(unused)
+            print_group('Commits and Comments', lines)
 
-            action = event.payload['action']
-            if action == 'closed' and pr.to_json()['merged']:
-                action = 'merged'
+            # Pull Requests, Pull Request File / Line / General Comments
+            lines, unused = handle_pr_events(unused, who)
+            print_group('Pull Requests', lines)
 
-            data.append((repo, num, when, action, user, title))
+            # Issues, Issue Comments
+            lines, unused = handle_issue_events(unused)
+            print_group('Issues', lines)
 
-        matches, rest = partition(is_pr_comment, rest)
-        for event in matches:
-            issue = event.payload['issue']
+            # Wiki Updates
+            lines, unused = handle_wiki_events(unused)
+            print_group('Wiki', lines)
 
-            repo = '/'.join(event.repo)
-            when = event.created_at
-            num = issue.number
-            user = issue.user.login
-            title = issue.title
+            for event in unused:
+                print("Warning: Unused event of type %s" % event.type)
 
-            action = event.payload['action']
-            if action == 'created':
-                action = 'discussed'
+        return ''
 
-            data.append((repo, num, when, action, user, title))
 
-        matches, rest = partition_type('PullRequestReviewCommentEvent', rest)
-        for event in matches:
-            if event.payload['action'] == 'deleted':
-                continue
+# -- Event List Processors
 
-            pr = event.payload['pull_request']
 
-            repo = '/'.join(event.repo)
-            when = event.created_at
-            num = pr.number
-            user = pr.user.login
-            title = pr.title
+def handle_public_events(iterable):
+    """Report private repositories being made public, and new releases."""
+    lines = []
+    unused = iterable
 
-            action = 'discussed'
+    # Private -> Public Transitions
+    events, unused = partition_type('PublicEvent', unused)
+    for event in events:
+        tmpl = 'made {} public'
+        lines.append(tmpl.format('/'.join(event.repo)))
 
-            data.append((repo, num, when, action, user, title))
+    # Releases
+    events, unused = partition_type('ReleaseEvent', unused)
+    for event in events:
+        tmpl = 'published release: {}'
+        lines.append(tmpl.format(event.payload['release'].name))
 
-        for repo, num, _, action, user, title in sorted(data):
-            tmpl = '* {action} pull request {repo}#{num} by @{user} - {title}'
-            print(tmpl.format(**locals()))
+    return (lines, unused)
 
-        # Report All Issues and Issue Comments
-        data = []
 
-        matches, rest = partition_type('IssuesEvent', rest)
-        for event in matches:
-            repo = '/'.join(event.repo)
-            when = event.created_at
-            num = event.payload['issue'].number
-            title = event.payload['issue'].title
-            action = event.payload['action']
+def handle_commit_events(iterable):
+    """Report pushes and commit comments."""
+    lines = []
+    unused = iterable
 
-            data.append((repo, num, when, action, title))
+    # Pushes
+    counts = defaultdict(int)
+    events, unused = partition_type('PushEvent', unused)
+    for event in events:
+        num = event.payload['size']
+        branch = event.payload['ref'].split('/')[-1]
 
-        matches, rest = partition(is_issue_comment, rest)
-        for event in matches:
-            if event.payload['action'] == 'deleted':
-                continue
+        if num == 0:
+            continue
 
-            repo = '/'.join(event.repo)
-            when = event.created_at
-            num = event.payload['issue'].number
-            title = event.payload['issue'].title
-            action = 'discussed'
+        counts[branch] += num
 
-            data.append((repo, num, when, action, title))
+    for (branch, count) in sorted(counts.items()):
+        noun = 'commit' if count == 1 else 'commits'
 
-        for repo, num, _, action, title in sorted(data):
-            tmpl = '* {action} issue {repo}#{num} - {title}'
-            print(tmpl.format(**locals()))
+        tmpl = 'pushed {} {} to branch {}'
+        lines.append(tmpl.format(count, noun, branch))
 
-        # Report all Commits
-        data = defaultdict(int)
+    # Commit Comments
+    events, unused = partition_type('CommitCommentEvent', unused)
+    for event in events:
+        tmpl = 'commented on commit {:.8}'
+        lines.append(tmpl.format(event.payload['comment'].commit_id))
 
-        matches, rest = partition_type('PushEvent', rest)
-        for event in matches:
-            num = event.payload['size']
-            repo = '/'.join(event.repo)
-            branch = event.payload['ref'].split('/')[-1]
+    return (lines, unused)
 
-            if num == 0:
-                continue
 
-            data[(repo, branch)] += num
+def handle_pr_events(iterable, who=None):
+    """Report pull request changes and comments."""
+    lines = []
+    unused = iterable
 
-        for (repo, branch), count in sorted(data.items()):
-            noun = 'commit' if count == 1 else 'commits'
+    actions = defaultdict(list)
 
-            tmpl = '* pushed {} {} to {} branch {}'
-            print(tmpl.format(count, noun, repo, branch))
+    # Pull Requests
+    events, unused = partition_type('PullRequestEvent', unused)
+    for event in sorted(events, key=lambda event: event.created_at):
+        pr = event.payload['pull_request']
 
-        # Report all Commit Comments
-        matches, rest = partition_type('CommitCommentEvent', rest)
-        for event in matches:
-            repo = '/'.join(event.repo)
-            sha = event.payload['comment'].commit_id
+        number = pr.number
+        title = pr.title
+        user = pr.user.login
 
-            tmpl = '* commented on commit {:.8} in {}'
-            print(tmpl.format(sha, repo))
+        action = event.payload['action']
+        if action == 'closed' and pr.to_json()['merged']:
+            action = 'merged'
 
-        # Report on all Wiki updates
-        data = defaultdict(set)
+        if user == who:
+            action = 'proposed' if action == 'opened' else action
+            action = 'rescinded' if action == 'closed' else action
 
-        matches, rest = partition_type('GollumEvent', rest)
-        for event in matches:
-            repo = '/'.join(event.repo)
+        key = (number, user, title)
+        actions[key].append(action)
 
-            for page in event.payload('pages'):
-                data[repo].add(page.title)
+    # Pull Request General Comments
+    events, unused = partition(is_pr_comment, unused)
+    for event in sorted(events, key=lambda event: event.created_at):
+        if event.payload['action'] == 'deleted':
+            continue
 
-        for repo, page in sorted(data.items()):
-            tmpl = '* edited {} wiki page - {}'
-            print(tmpl.format(repo, page))
+        pr = event.payload['issue']
 
-        # Report on all Release events
-        data = defaultdict(set)
+        number = pr.number
+        title = pr.title
+        user = pr.user.login
 
-        matches, rest = partition_type('ReleaseEvent', rest)
-        for event in matches:
-            repo = '/'.join(event.repo)
-            name = event.payload['release'].name
+        key = (number, user, title)
+        actions[key].append('discussed')
 
-            data[repo].add(name)
+    # Pull Request File / Line Comments
+    events, unused = partition_type('PullRequestReviewCommentEvent', unused)
+    for event in sorted(events, key=lambda event: event.created_at):
+        if event.payload['action'] == 'deleted':
+            continue
 
-        for repo, release in sorted(data.items()):
-            tmpl = '* published release of {} - {}'
-            print(tmpl.format(repo, release))
+        pr = event.payload['pull_request']
 
-        return 'Incomplete'
+        number = pr.number
+        title = pr.title
+        user = pr.user.login
+
+        key = (number, user, title)
+        actions[key].append('discussed')
+
+    for (number, user, title), actions in sorted(actions.items()):
+        summary = grammatical_join(list(uniq(actions)))
+
+        if user == who:
+            tmpl = '{} pull request #{} - {}'
+            lines.append(tmpl.format(summary, number, title))
+        else:
+            tmpl = '{} pull request #{} by @{} - {}'
+            lines.append(tmpl.format(summary, number, user, title))
+
+    return (lines, unused)
+
+
+def handle_issue_events(iterable):
+    """Report issue changes and comments."""
+    lines = []
+    unused = iterable
+
+    actions = defaultdict(list)
+
+    # Issues
+    events, unused = partition_type('IssuesEvent', unused)
+    for event in events:
+        number = event.payload['issue'].number
+        title = event.payload['issue'].title
+
+        key = (number, title)
+        actions[key].append(event.payload['action'])
+
+    # Issue Comments
+    events, unused = partition(is_issue_comment, unused)
+    for event in events:
+        if event.payload['action'] == 'deleted':
+            continue
+
+        number = event.payload['issue'].number
+        title = event.payload['issue'].title
+
+        key = (number, title)
+        actions[key].append('discussed')
+
+    for (number, title), actions in sorted(actions.items()):
+        summary = grammatical_join(list(uniq(actions)))
+
+        tmpl = '{} issue #{} - {}'
+        lines.append(tmpl.format(summary, number, title))
+
+    return (lines, unused)
+
+
+def handle_wiki_events(iterable):
+    """Report wiki updates."""
+    lines = []
+    unused = iterable
+
+    pages = set()
+
+    events, unused = partition_type('GollumEvent', unused)
+    for event in events:
+        for page in event.payload['pages']:
+            pages.add(page.title)
+
+    for page in sorted(pages):
+        tmpl = 'edited wiki page - {}'
+        lines.append(tmpl.format(page))
+
+    return (lines, unused)
 
 
 # -- Local Helpers
+
 
 def prune(iterable, start, end):
     """Discard events that fall outside the start-end interval."""
@@ -238,7 +303,7 @@ def prune(iterable, start, end):
     if oldest_event.created_at >= start:
         msg = 'Warning: May be missing valid events between %s and %s'
         print(msg % (datetime.strftime(start, '%Y-%m-%d'),
-                     datetime.strftime(oldest.created_at, '%Y-%m-%d')))
+                     datetime.strftime(oldest_event.created_at, '%Y-%m-%d')))
 
     return (event for event in iterable if start <= event.created_at < end)
 
@@ -277,3 +342,38 @@ def is_pr_comment(event):
         return right_type and right_payload
     except (KeyError, IndexError, AttributeError, TypeError):
         return False
+
+
+def print_group(header, lines):
+    """Print all lines in an array, prepending '* ' to each line."""
+    lines = list(lines)
+
+    if lines:
+        print('%s:\n' % header)
+        for line in lines:
+            print('* %s' % line)
+        print()
+
+
+def grammatical_join(words):
+    """Join a list of words, using an oxford comma if appropriate."""
+    if '__getitem__' not in words:
+        words = list(words)
+
+    if len(words) == 2:
+        return ' and '.join(words)
+    else:
+        words = words[:-2] + [', and '.join(words[-2:])]
+        return ', '.join(words)
+
+
+def uniq(iterable):
+    """Filter consecutively repeated elements in an iterable."""
+    previous = None
+
+    for item in iterable:
+        if item == previous:
+            continue
+
+        previous = item
+        yield item
