@@ -1,8 +1,12 @@
+"""GitHub source adapter."""
+
 import github3
+
+from collections import defaultdict
+from datetime import datetime
 
 from utils import partition
 
-from collections import defaultdict
 
 # See: https://developer.github.com/v3/activity/events/types/
 
@@ -46,36 +50,31 @@ KNOWN_EVENTS = KEEP_EVENTS + IGNORE_EVENTS
 
 
 class GitHub(object):
+    """Connects to and reports on GitHub events."""
+
     def __init__(self, token, start, end):
+        """Create a new, date-bounded GitHub source."""
         self.gh = github3.login(token=token)
         self.start = start
         self.end = end
 
     def report(self, who):
+        """Generate a report of a given user's activity."""
         user = self.gh.user(who)
 
-        all_events = list(user.iter_events())
-        all_events.sort(key=lambda e: e.created_at, reverse=True)
+        # Only relevant dates
+        events = prune(user.iter_events(), self.start, self.end)
 
-        oldest = all_events[-1]
-        if oldest.created_at >= self.start:
-            msg = 'Warning: May be missing valid events between %s and %s'
-            print(msg % (datetime.strftime(self.start, fmt),
-                         datetime.strftime(oldest.created_at, fmt)))
+        # Only known events, reporting any unknown
+        events = filter_types(KNOWN_EVENTS, events, verbose=True)
 
-        events = [e for e in user.iter_events()
-                  if self.start <= e.created_at < self.end]
+        # Only events of whitelisted types
+        events = filter_types(KEEP_EVENTS, events)
 
-        known, unknown = partition(lambda e: e.type in KNOWN_EVENTS, events)
-        for event in unknown:
-            print('Warning: Unrecognized event type: %s' % event.type)
-
-        kept, ignored = partition(lambda e: e.type in KEEP_EVENTS, known)
-
-        rest = kept
+        rest = events
 
         # Report All Private -> Public Repository Transitions
-        matches, rest = partitiontype('PublicEvent', rest)
+        matches, rest = partition_type('PublicEvent', rest)
         for event in matches:
             tmpl = '* made {repository.full_name} public'
             print(tmpl.format(**event.payload))
@@ -83,7 +82,7 @@ class GitHub(object):
         # Report All Pull Request Interactions
         data = []
 
-        matches, rest = partitiontype('PullRequestEvent', rest)
+        matches, rest = partition_type('PullRequestEvent', rest)
         for event in matches:
             pr = event.payload['pull_request']
 
@@ -115,7 +114,7 @@ class GitHub(object):
 
             data.append((repo, num, when, action, user, title))
 
-        matches, rest = partitiontype('PullRequestReviewCommentEvent', rest)
+        matches, rest = partition_type('PullRequestReviewCommentEvent', rest)
         for event in matches:
             if event.payload['action'] == 'deleted':
                 continue
@@ -139,7 +138,7 @@ class GitHub(object):
         # Report All Issues and Issue Comments
         data = []
 
-        matches, rest = partitiontype('IssuesEvent', rest)
+        matches, rest = partition_type('IssuesEvent', rest)
         for event in matches:
             repo = '/'.join(event.repo)
             when = event.created_at
@@ -169,7 +168,7 @@ class GitHub(object):
         # Report all Commits
         data = defaultdict(int)
 
-        matches, rest = partitiontype('PushEvent', rest)
+        matches, rest = partition_type('PushEvent', rest)
         for event in matches:
             num = event.payload['size']
             repo = '/'.join(event.repo)
@@ -187,7 +186,7 @@ class GitHub(object):
             print(tmpl.format(count, noun, repo, branch))
 
         # Report all Commit Comments
-        matches, rest = partitiontype('CommitCommentEvent', rest)
+        matches, rest = partition_type('CommitCommentEvent', rest)
         for event in matches:
             repo = '/'.join(event.repo)
             sha = event.payload['comment'].commit_id
@@ -198,7 +197,7 @@ class GitHub(object):
         # Report on all Wiki updates
         data = defaultdict(set)
 
-        matches, rest = partitiontype('GollumEvent', rest)
+        matches, rest = partition_type('GollumEvent', rest)
         for event in matches:
             repo = '/'.join(event.repo)
 
@@ -212,7 +211,7 @@ class GitHub(object):
         # Report on all Release events
         data = defaultdict(set)
 
-        matches, rest = partitiontype('ReleaseEvent', rest)
+        matches, rest = partition_type('ReleaseEvent', rest)
         for event in matches:
             repo = '/'.join(event.repo)
             name = event.payload['release'].name
@@ -228,11 +227,40 @@ class GitHub(object):
 
 # -- Local Helpers
 
-def partitiontype(type, lst):
-    return partition(lambda event: event.type == type, lst)
+def prune(iterable, start, end):
+    """Discard events that fall outside the start-end interval."""
+    events = sorted(iterable, key=lambda event: event.created_at)
+    events.reverse()
+
+    # Check if we have at least one event older than the start date.
+    # If so, then we have a complete record for the desired interval.
+    oldest_event = events[-1]
+    if oldest_event.created_at >= start:
+        msg = 'Warning: May be missing valid events between %s and %s'
+        print(msg % (datetime.strftime(start, '%Y-%m-%d'),
+                     datetime.strftime(oldest.created_at, '%Y-%m-%d')))
+
+    return (event for event in iterable if start <= event.created_at < end)
+
+
+def filter_types(types, iterable, verbose=False):
+    """Filter events that match several types."""
+    known, unknown = partition(lambda event: event.type in types, iterable)
+
+    if verbose:
+        for event in unknown:
+            print('Warning: Ignored or unknown event type: %s' % event.type)
+
+    return known
+
+
+def partition_type(typ, lst):
+    """Split an event list into two lists based on event.type."""
+    return partition(lambda event: event.type == typ, lst)
 
 
 def is_issue_comment(event):
+    """Determine if a comment applies to an issue."""
     try:
         right_type = event.type == 'IssueCommentEvent'
         right_payload = 'pull_request' not in event.payload['issue'].to_json()
@@ -242,6 +270,7 @@ def is_issue_comment(event):
 
 
 def is_pr_comment(event):
+    """Determine if a comment applies to a pull request."""
     try:
         right_type = event.type == 'IssueCommentEvent'
         right_payload = 'pull_request' in event.payload['issue'].to_json()
