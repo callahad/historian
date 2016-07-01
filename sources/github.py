@@ -74,12 +74,17 @@ class GitHub(object):
         # Only events of whitelisted types
         events = filter_types(KEEP_EVENTS, events)
 
+        # Reify the selected events
+        events = list(events)
+
+        result += stringify_group('Repositories', summarize_repos(events))
+
         # Group events by repository
         key = attrgetter('repo')
         for repo, events in groupby(sorted(events, key=key), key=key):
             repo = '/'.join(repo)
 
-            result += '#### %s\n\n' % repo
+            result += '\n#### %s\n\n' % repo
 
             unused = events
 
@@ -106,8 +111,6 @@ class GitHub(object):
             for event in unused:
                 print("Warning: Unused event of type %s" % event.type)
 
-        print(result)
-
         return result
 
 
@@ -127,9 +130,17 @@ def handle_public_events(iterable):
 
     # Releases
     events, unused = partition_type('ReleaseEvent', unused)
-    for event in events:
-        tmpl = 'published release: {}'
-        lines.append(tmpl.format(event.payload['release'].name))
+    for event in sorted(events, key=lambda event: event.created_at):
+        tag = event.payload['release'].tag_name
+        url = event.payload['release'].html_url
+        name = event.payload['release'].name
+
+        if name:
+            tmpl = 'published release [{}]({}) - ({})'
+        else:
+            tmpl = 'published release [{}]({})'
+
+        lines.append(tmpl.format(tag, url, name))
 
     return (lines, unused)
 
@@ -300,6 +311,14 @@ def handle_wiki_events(iterable):
 # -- Local Helpers
 
 
+def summarize_repos(events):
+    """Generate list of all repos in the iterable of events."""
+    repos = set(event.repo for event in events)
+
+    tmpl = '[{0}/{1}](https://github.com/{0}/{1})'
+    return [tmpl.format(*repo) for repo in sorted(repos)]
+
+
 def prune(iterable, start, end):
     """Discard events that fall outside the start-end interval."""
     events = sorted(iterable, key=lambda event: event.created_at)
@@ -353,16 +372,13 @@ def is_pr_comment(event):
 
 
 def stringify_group(header, lines):
-    """Join all lines in an array into a single string."""
+    """Join all lines in an array into a single, bulleted markdown string."""
     lines = list(lines)
 
     if not lines:
         return ''
 
-    heading = '%s:\n\n' % header
-    body = '\n'.join('* %s' % line for line in lines)
-
-    return heading + body + '\n\n'
+    return '\n'.join('* %s' % line for line in lines) + '\n'
 
 
 def print_group(header, lines):
@@ -398,3 +414,5 @@ def uniq(iterable):
 
         previous = item
         yield item
+
+# pylama:ignore=R0204
