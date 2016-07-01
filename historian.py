@@ -5,6 +5,7 @@
 from datetime import datetime, timezone
 from os import mkdir
 from shutil import rmtree
+from sys import exit
 
 from configobj import ConfigObj
 
@@ -13,7 +14,10 @@ import sources
 
 def main():
     """Generate reports of online activity."""
-    config = ConfigObj('config.ini', interpolation=False)
+    try:
+        config = ConfigObj('config.ini', interpolation=False, file_error=True)
+    except IOError:
+        exit('Error: File Not Found "config.ini"')
 
     # FIXME: Hardcoded start / end dates, currently 2016 Q2
     start = datetime(2016, 4, 1).replace(tzinfo=timezone.utc)
