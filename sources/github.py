@@ -82,9 +82,8 @@ class GitHub(object):
         # Group events by repository
         key = attrgetter('repo')
         for repo, events in groupby(sorted(events, key=key), key=key):
-            repo = '/'.join(repo)
-
-            result += '\n#### %s\n\n' % repo
+            header_tmpl = '\n#### [{0}/{1}](https://github.com/{0}/{1})\n\n'
+            result += header_tmpl.format(*repo)
 
             unused = events
 
